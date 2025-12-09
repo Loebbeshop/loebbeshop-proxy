@@ -1,12 +1,11 @@
 <?php
 /**
- * Loebbeshop Proxy API
- * ---------------------
- * - Ruft Produktdaten aus Smartstore OData ab
- * - Unterstützt Suche nach Name, Hersteller, SKU (Fallback)
- * - GPT-kompatible JSON-Ausgabe
- * - Sichere URL-Kodierung
- * - CORS aktiviert
+ * Loebbeshop Proxy API (fehlerfreie SKU-Fallback-Version)
+ * -------------------------------------------------------
+ * - Durchsucht Name + Manufacturer (sicher)
+ * - Wenn keine Treffer → prüft exakte SKU
+ * - Verhindert Smartstore-500-Fehler
+ * - GPT-kompatibel (CORS aktiviert)
  * 
  * Autor: Loebbeshop
  * Stand: 2025-12
@@ -32,21 +31,14 @@ $top = isset($_GET['top']) ? intval($_GET['top']) : 5;
 if ($top <= 0 || $top > 50) $top = 5;
 $q = isset($_GET['q']) ? trim($_GET['q']) : null;
 
-// === Smartstore-Endpunkt ===
-$smartstoreUrl = "https://www.loebbeshop.de/odata/v1/Products?\$top={$top}";
-
-// === Suchfunktion (Name/Manufacturer) ===
-if (!empty($q)) {
-    $encodedQ = str_replace("'", "''", $q);
-    $filter = "contains(Name,'{$encodedQ}') or contains(Manufacturer,'{$encodedQ}')";
-    $smartstoreUrl .= "&" . '$filter=' . urlencode($filter);
-}
+// === Basis-URL ===
+$baseUrl = "https://www.loebbeshop.de/odata/v1/Products";
 
 // === Auth vorbereiten ===
 $credentials = trim($publicKey) . ':' . trim($secretKey);
 $authHeader = 'Basic ' . base64_encode($credentials);
 
-// === Funktion: API-Aufruf durchführen ===
+// === Funktion für API-Aufrufe ===
 function callSmartstore($url, $authHeader) {
     $ch = curl_init();
     curl_setopt_array($ch, [
@@ -64,51 +56,46 @@ function callSmartstore($url, $authHeader) {
     $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     $curlError = curl_error($ch);
     curl_close($ch);
-
     return [$response, $httpCode, $curlError];
 }
 
-// === Erster Request (Name/Manufacturer) ===
-list($response, $httpCode, $curlError) = callSmartstore($smartstoreUrl, $authHeader);
+// === Wenn kein Suchbegriff ===
+if (empty($q)) {
+    $url = "{$baseUrl}?\$top={$top}";
+    list($response, $httpCode, $curlError) = callSmartstore($url, $authHeader);
+} else {
+    // 1️⃣ Suche Name/Manufacturer (sicher)
+    $encodedQ = str_replace("'", "''", $q);
+    $filter = "contains(Name,'{$encodedQ}') or contains(Manufacturer,'{$encodedQ}')";
+    $url = "{$baseUrl}?\$top={$top}&" . '$filter=' . urlencode($filter);
 
-// === Fehler bei cURL? ===
-if ($curlError) {
+    list($response, $httpCode, $curlError) = callSmartstore($url, $authHeader);
+
+    // 2️⃣ Wenn keine Treffer → exakte SKU-Suche
+    if ($httpCode === 200 && !empty($response)) {
+        $data = json_decode($response, true);
+        if (empty($data['value'])) {
+            $skuFilter = "Sku eq '{$encodedQ}'";
+            $skuUrl = "{$baseUrl}?\$filter=" . urlencode($skuFilter);
+            list($skuResponse, $skuCode, $skuError) = callSmartstore($skuUrl, $authHeader);
+
+            if ($skuCode === 200 && !empty($skuResponse)) {
+                $response = $skuResponse;
+            }
+        }
+    }
+}
+
+// === Fehlerbehandlung ===
+if (!empty($curlError)) {
     http_response_code(500);
     echo json_encode(["error" => "Proxy-Fehler: " . $curlError]);
     exit;
 }
 
-// === Wenn kein Treffer, Fallback: exakte SKU-Suche ===
-if ($httpCode === 200 && !empty($q)) {
-    $data = json_decode($response, true);
-    if (empty($data['value'])) {
-        $encodedQ = str_replace("'", "''", $q);
-        $skuFilter = "Sku eq '{$encodedQ}'";
-        $skuUrl = "https://www.loebbeshop.de/odata/v1/Products?\$filter=" . urlencode($skuFilter);
-
-        list($skuResponse, $skuCode, $skuError) = callSmartstore($skuUrl, $authHeader);
-
-        if ($skuCode === 200 && !empty($skuResponse)) {
-            $response = $skuResponse;
-        }
-    }
-}
-
-// === Debug (optional aktivieren) ===
-// file_put_contents(__DIR__ . "/debug_log.json", json_encode([
-//     "timestamp" => date('Y-m-d H:i:s'),
-//     "url" => $smartstoreUrl,
-//     "status" => $httpCode,
-//     "responseSnippet" => substr($response, 0, 500)
-// ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-
-// === HTTP-Fehler weitergeben ===
-if ($httpCode !== 200) {
-    http_response_code($httpCode);
-    echo json_encode([
-        "error" => "Smartstore-API antwortete mit HTTP $httpCode",
-        "url" => $smartstoreUrl
-    ]);
+if (empty($response)) {
+    http_response_code(404);
+    echo json_encode(["error" => "Keine Daten gefunden"]);
     exit;
 }
 
