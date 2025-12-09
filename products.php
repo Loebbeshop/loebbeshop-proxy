@@ -4,14 +4,15 @@
  * ---------------------
  * - Ruft Produktdaten aus Smartstore OData ab
  * - Unterstützt Suche nach Name, Hersteller, SKU
- * - JSON-Ausgabe für GPT / externe Systeme
- * - CORS aktiviert für öffentliche Nutzung
+ * - GPT-kompatible JSON-Ausgabe
+ * - Sichere URL-Kodierung (kein „Malformed input“-Fehler)
+ * - CORS aktiviert
  * 
  * Autor: Loebbeshop
  * Stand: 2025-12
  */
 
-// --- CORS erlauben (wichtig für GPT) ---
+// --- CORS erlauben (für GPT/OpenAI & externe Tools) ---
 header("Access-Control-Allow-Origin: *");
 header("Access-Control-Allow-Methods: GET, OPTIONS");
 header("Access-Control-Allow-Headers: Content-Type, Authorization");
@@ -36,10 +37,14 @@ $smartstoreUrl = "https://www.loebbeshop.de/odata/v1/Products?\$top={$top}";
 
 // === Suchfunktion erweitern ===
 if (!empty($q)) {
-    // Doppelte Hochkommas escapen, sonst Fehler in OData
+    // Eingabe bereinigen (Sonderzeichen, Hochkommas)
     $encodedQ = str_replace("'", "''", $q);
-    // Suche in Name, Hersteller, SKU
-    $smartstoreUrl .= "&\$filter=contains(Name,'{$encodedQ}') or contains(Manufacturer,'{$encodedQ}') or contains(Sku,'{$encodedQ}')";
+
+    // OData-Filterausdruck bauen
+    $filter = "contains(Name,'{$encodedQ}') or contains(Manufacturer,'{$encodedQ}') or contains(Sku,'{$encodedQ}')";
+
+    // Gesamten Filter-Ausdruck URL-encodieren
+    $smartstoreUrl .= "&" . '$filter=' . urlencode($filter);
 }
 
 // === Auth vorbereiten ===
@@ -65,7 +70,7 @@ $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 $curlError = curl_error($ch);
 curl_close($ch);
 
-// === Debug-Option (optional aktivieren) ===
+// === Debug-Datei (optional aktivieren) ===
 // file_put_contents(__DIR__ . "/debug_log.json", json_encode([
 //     "timestamp" => date('Y-m-d H:i:s'),
 //     "url" => $smartstoreUrl,
@@ -90,5 +95,5 @@ if ($httpCode !== 200) {
     exit;
 }
 
-// === Erfolgreiche Antwort ausgeben ===
+// === Erfolgreiche Antwort ===
 echo $response;
