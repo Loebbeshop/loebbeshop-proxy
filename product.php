@@ -7,7 +7,6 @@ header('Content-Type: application/json; charset=utf-8');
  * Datei: product.php
  */
 
-// === Smartstore API Keys ===
 $publicKey = '0884bd1c9bdb7e2f17a3e1429b1c5021';
 $secretKey = '33b5b3892603471204755cd4f015bc97';
 
@@ -19,12 +18,12 @@ if (!$sku) {
     exit;
 }
 
-// === Smartstore-Endpunkt ===
-$smartstoreUrl = "https://www.loebbeshop.de/odata/v1/Products?\$filter=Sku eq '{$sku}'";
-
 // === Auth vorbereiten ===
 $credentials = trim($publicKey) . ':' . trim($secretKey);
 $authHeader = 'Basic ' . base64_encode($credentials);
+
+// === Smartstore-Endpunkt (sicher kodiert) ===
+$smartstoreUrl = "https://www.loebbeshop.de/odata/v1/Products?\$filter=" . urlencode("Sku eq '" . addslashes($sku) . "'");
 
 // === cURL-Request ===
 $ch = curl_init();
@@ -56,12 +55,13 @@ if ($httpCode !== 200) {
     http_response_code($httpCode);
     echo json_encode([
         "error" => "Smartstore-API Fehler oder keine Antwort",
-        "status" => $httpCode
+        "status" => $httpCode,
+        "url" => $smartstoreUrl
     ]);
     exit;
 }
 
-// === Antwort prüfen und ggf. reduzieren ===
+// === Antwort prüfen ===
 $data = json_decode($response, true);
 if (isset($data['value']) && count($data['value']) > 0) {
     $product = $data['value'][0];
