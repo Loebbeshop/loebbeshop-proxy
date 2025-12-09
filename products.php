@@ -2,12 +2,11 @@
 header('Content-Type: application/json; charset=utf-8');
 
 /**
- * Smartstore Proxy – Such-API
- * Zweck: Liefert Produktlisten nach Suchbegriff (Name, Hersteller)
+ * Smartstore Proxy – Produktsuche (lokale Filterung)
  * Datei: products.php
+ * Zweck: Gibt Produkte anhand eines Suchbegriffs zurück, ohne OData-Filter.
  */
 
-// === Smartstore API Keys ===
 $publicKey = '0884bd1c9bdb7e2f17a3e1429b1c5021';
 $secretKey = '33b5b3892603471204755cd4f015bc97';
 
@@ -22,13 +21,12 @@ if (!$q) {
     exit;
 }
 
-// === Smartstore-Endpunkt ===
-$smartstoreUrl = "https://www.loebbeshop.de/odata/v1/Products?\$top={$top}&\$filter=" .
-    "contains(Name,'{$q}') or contains(Manufacturer,'{$q}')";
-
 // === Auth vorbereiten ===
 $credentials = trim($publicKey) . ':' . trim($secretKey);
 $authHeader = 'Basic ' . base64_encode($credentials);
+
+// === Smartstore-Endpunkt (ohne Filter oder Search) ===
+$smartstoreUrl = "https://www.loebbeshop.de/odata/v1/Products?\$orderby=UpdatedOnUtc desc&\$top=200";
 
 // === cURL-Request ===
 $ch = curl_init();
@@ -41,7 +39,7 @@ curl_setopt_array($ch, [
         "User-Agent: SmartstoreProxy/1.0 (+https://api.online-shop.services)"
     ],
     CURLOPT_SSL_VERIFYPEER => true,
-    CURLOPT_TIMEOUT => 20
+    CURLOPT_TIMEOUT => 30
 ]);
 
 $response = curl_exec($ch);
@@ -59,11 +57,47 @@ if ($curlError) {
 if ($httpCode !== 200) {
     http_response_code($httpCode);
     echo json_encode([
-        "error" => "Smartstore-API antwortete mit HTTP $httpCode",
+        "error" => "Smartstore-API Fehler oder keine Antwort",
+        "status" => $httpCode,
         "url" => $smartstoreUrl
     ]);
     exit;
 }
 
-// === Erfolgreiche Antwort ===
-echo $response;
+// === Lokale Filterung ===
+$data = json_decode($response, true);
+if (!isset($data['value']) || !is_array($data['value'])) {
+    echo json_encode(["error" => "Keine Daten von Smartstore erhalten"]);
+    exit;
+}
+
+$qLower = mb_strtolower($q, 'UTF-8');
+$results = [];
+
+foreach ($data['value'] as $item) {
+    $name = mb_strtolower($item['Name'] ?? '', 'UTF-8');
+    $desc = mb_strtolower($item['ShortDescription'] ?? '', 'UTF-8');
+    $sku = mb_strtolower($item['Sku'] ?? '', 'UTF-8');
+
+    if (str_contains($name, $qLower) || str_contains($desc, $qLower) || str_contains($sku, $qLower)) {
+        $results[] = [
+            "Id" => $item["Id"] ?? null,
+            "Sku" => $item["Sku"] ?? null,
+            "Name" => $item["Name"] ?? "",
+            "Manufacturer" => $item["Manufacturer"] ?? "",
+            "Price" => isset($item["Price"]) ? round($item["Price"], 2) . " €" : "",
+            "ShortDescription" => $item["ShortDescription"] ?? "",
+            "ProductUrl" => "https://www.loebbeshop.de/product/" . ($item["Id"] ?? ""),
+            "ImageUrl" => $item["ImageUrl"] ?? null
+        ];
+
+        if (count($results) >= $top) break;
+    }
+}
+
+// === Antwort ===
+if (count($results) > 0) {
+    echo json_encode($results, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+} else {
+    echo json_encode(["error" => "Keine Produkte gefunden", "query" => $q]);
+}
