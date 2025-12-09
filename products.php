@@ -2,10 +2,10 @@
 header('Content-Type: application/json; charset=utf-8');
 
 /**
- * Smartstore Proxy (SKU-Redirect + stabile Textsuche)
- * - Holt Daten ohne OData-Filter
- * - Fügt $count=false hinzu (verhindert HTTP 400)
- * - SKU-Anfragen werden an /search/?q= weitergeleitet
+ * Smartstore Proxy (finale stabile Version)
+ * - Führt lokale Produktsuche aus
+ * - Erkennt SKU-Suchen und erstellt Weiterleitungslink
+ * - Keine OData-Parameter mehr → kompatibel mit allen Smartstore-Versionen
  */
 
 $publicKey = '0884bd1c9bdb7e2f17a3e1429b1c5021';
@@ -22,7 +22,7 @@ if (!$q) {
     exit;
 }
 
-// === Wenn der Suchbegriff wie eine SKU aussieht (nur Zahlen)
+// === SKU-Format prüfen ===
 if (preg_match('/^[0-9]{4,10}$/', $q)) {
     echo json_encode([
         "info" => "Direkte SKU-Suche erkannt",
@@ -36,8 +36,8 @@ if (preg_match('/^[0-9]{4,10}$/', $q)) {
 $credentials = trim($publicKey) . ':' . trim($secretKey);
 $authHeader = 'Basic ' . base64_encode($credentials);
 
-// === Stabiler Smartstore-Endpunkt
-$smartstoreUrl = "https://www.loebbeshop.de/odata/v1/Products?\$top=200&\$count=false";
+// === Smartstore-Endpunkt (ohne $top/$filter)
+$smartstoreUrl = "https://www.loebbeshop.de/odata/v1/Products";
 
 $ch = curl_init();
 curl_setopt_array($ch, [
