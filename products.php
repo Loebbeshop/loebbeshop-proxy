@@ -1,14 +1,13 @@
 <?php
 /**
- * Loebbeshop Proxy API – stabile "No-filter"-Version
- * --------------------------------------------------
+ * Loebbeshop Proxy API – finale Produktionsversion mit Cache
+ * -----------------------------------------------------------
  * - Holt Produktdaten ohne $filter von Smartstore
- * - Filtert Name, Hersteller, SKU lokal in PHP
- * - Kein Smartstore-OData-Fehler mehr möglich
+ * - Filtert lokal nach Name, Hersteller, SKU
+ * - Cacht die Smartstore-Antwort für 10 Minuten (reduziert Serverlast)
  * - GPT-kompatibel (CORS aktiviert)
  * 
- * Autor: Loebbeshop
- * Stand: 2025-12
+ * Autor: Loebbeshop / 2025-12
  */
 
 // --- CORS erlauben ---
@@ -32,65 +31,76 @@ $top = isset($_GET['top']) ? intval($_GET['top']) : 5;
 if ($top <= 0 || $top > 100) $top = 5;
 
 // === Smartstore-Endpunkt ===
-// Wir holen z. B. die ersten 300 Produkte (kannst du anpassen)
-$baseUrl = "https://www.loebbeshop.de/odata/v1/Products?\$top=300";
+$baseUrl = "https://www.loebbeshop.de/odata/v1/Products?\$top=100";
 
-// === Auth vorbereiten ===
-$credentials = trim($publicKey) . ':' . trim($secretKey);
-$authHeader = 'Basic ' . base64_encode($credentials);
+// === Cache-Datei ===
+$cacheDir = __DIR__ . "/cache";
+if (!is_dir($cacheDir)) mkdir($cacheDir, 0777, true);
+$cacheFile = $cacheDir . "/products_cache.json";
+$cacheTime = 600; // 10 Minuten (600 Sekunden)
 
-// === cURL-Request ===
-$ch = curl_init();
-curl_setopt_array($ch, [
-    CURLOPT_URL => $baseUrl,
-    CURLOPT_RETURNTRANSFER => true,
-    CURLOPT_HTTPHEADER => [
-        "Authorization: $authHeader",
-        "Accept: application/json",
-        "User-Agent: LoebbeshopProxy/1.0 (+https://www.loebbeshop.de)"
-    ],
-    CURLOPT_SSL_VERIFYPEER => true,
-    CURLOPT_TIMEOUT => 30
-]);
+// === Prüfen, ob Cache gültig ist ===
+if (file_exists($cacheFile) && (time() - filemtime($cacheFile) < $cacheTime)) {
+    $data = json_decode(file_get_contents($cacheFile), true);
+    $source = "cache";
+} else {
+    // === Smartstore-Daten neu abrufen ===
+    $credentials = trim($publicKey) . ':' . trim($secretKey);
+    $authHeader = 'Basic ' . base64_encode($credentials);
 
-$response = curl_exec($ch);
-$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-$curlError = curl_error($ch);
-curl_close($ch);
+    $ch = curl_init();
+    curl_setopt_array($ch, [
+        CURLOPT_URL => $baseUrl,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER => [
+            "Authorization: $authHeader",
+            "Accept: application/json",
+            "User-Agent: LoebbeshopProxy/1.0 (+https://www.loebbeshop.de)"
+        ],
+        CURLOPT_SSL_VERIFYPEER => true,
+        CURLOPT_TIMEOUT => 60
+    ]);
 
-// === Fehlerbehandlung ===
-if ($curlError) {
-    http_response_code(500);
-    echo json_encode(["error" => "Proxy-Fehler: " . $curlError]);
-    exit;
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curlError = curl_error($ch);
+    curl_close($ch);
+
+    if ($curlError) {
+        http_response_code(500);
+        echo json_encode(["error" => "Proxy-Fehler: " . $curlError]);
+        exit;
+    }
+
+    if ($httpCode !== 200 || empty($response)) {
+        http_response_code($httpCode ?: 500);
+        echo json_encode(["error" => "Smartstore-API Fehler oder keine Antwort", "status" => $httpCode]);
+        exit;
+    }
+
+    $data = json_decode($response, true);
+
+    // Cache speichern
+    file_put_contents($cacheFile, json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+    $source = "smartstore";
 }
-
-if ($httpCode !== 200 || empty($response)) {
-    http_response_code($httpCode ?: 500);
-    echo json_encode(["error" => "Smartstore-API Fehler oder keine Antwort"]);
-    exit;
-}
-
-// === Daten verarbeiten ===
-$data = json_decode($response, true);
 
 // === Lokales Filtern ===
 if (!empty($q) && isset($data['value'])) {
     $qLower = mb_strtolower($q);
-
     $filtered = array_filter($data['value'], function ($item) use ($qLower) {
-        $inName = isset($item['Name']) && mb_stripos($item['Name'], $qLower) !== false;
-        $inManufacturer = isset($item['Manufacturer']) && mb_stripos($item['Manufacturer'], $qLower) !== false;
-        $inSku = isset($item['Sku']) && mb_stripos($item['Sku'], $qLower) !== false;
-        return $inName || $inManufacturer || $inSku;
+        return (isset($item['Name']) && mb_stripos($item['Name'], $qLower) !== false)
+            || (isset($item['Manufacturer']) && mb_stripos($item['Manufacturer'], $qLower) !== false)
+            || (isset($item['Sku']) && mb_stripos($item['Sku'], $qLower) !== false);
     });
-
-    // Begrenze auf $top Ergebnisse
     $data['value'] = array_slice(array_values($filtered), 0, $top);
 } else {
-    // Wenn keine Suche, zeige einfach die ersten $top Produkte
     $data['value'] = array_slice($data['value'], 0, $top);
 }
 
-// === Antwort zurückgeben ===
-echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+// === Ausgabe ===
+echo json_encode([
+    "source" => $source,
+    "result_count" => count($data['value']),
+    "results" => $data['value']
+], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
