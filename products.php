@@ -2,10 +2,10 @@
 header('Content-Type: application/json; charset=utf-8');
 
 /**
- * LöbbeShop Smartstore Proxy (Version 2.4 - präzise Filterung)
- * -------------------------------------------------------------
- * - Unterstützt kombinierte Suche nach Herstellernummer + Suchwort
- * - Filtert Ergebnisse serverseitig (keine Smartstore-Fehler mehr)
+ * LöbbeShop Smartstore Proxy (Version 2.4.1 - robust)
+ * ---------------------------------------------------
+ * Kombinierte Suche nach Wartungsset + Herstellernummer
+ * Stabile Fehlerbehandlung und klare Fallback-Logik
  */
 
 $publicKey = '0884bd1c9bdb7e2f17a3e1429b1c5021';
@@ -26,7 +26,7 @@ function callSmartstore($url, $authHeader) {
         CURLOPT_HTTPHEADER => [
             "Authorization: {$authHeader}",
             "Accept: application/json",
-            "User-Agent: LoebbeshopProxy/2.4"
+            "User-Agent: LoebbeshopProxy/2.4.1"
         ],
         CURLOPT_SSL_VERIFYPEER => true,
         CURLOPT_TIMEOUT => 20
@@ -65,15 +65,18 @@ if ($q && !$num) {
     $urlNum = $baseUrl . "&\$filter=" . urlencode("contains(Name,'{$num}') or contains(ShortDescription,'{$num}') or contains(Sku,'{$num}')");
     $dataNum = callSmartstore($urlNum, $authHeader);
 
-    // Dann lokal nach „Wartungsset“ filtern
-    $results = array_filter($dataNum, function($item) use ($q) {
-        $fields = ($item['Name'] ?? '') . ' ' . ($item['ShortDescription'] ?? '');
-        return stripos($fields, $q) !== false;
-    });
+    // Dann lokal nach „Wartungsset“ filtern (nur wenn Ergebnis-Array)
+    if (is_array($dataNum)) {
+        $results = array_filter($dataNum, function($item) use ($q) {
+            if (!is_array($item)) return false;
+            $fields = ($item['Name'] ?? '') . ' ' . ($item['ShortDescription'] ?? '');
+            return stripos($fields, $q) !== false;
+        });
+    }
 }
 
-// 🔁 Fallback bei leeren Treffern
-if (empty($results)) {
+// 🔁 Fallback bei leeren Treffern oder Fehlerobjekten
+if (empty($results) || isset($results['error'])) {
     echo json_encode([
         "error" => "Keine passenden Produkte gefunden.",
         "query" => $q,
@@ -85,8 +88,10 @@ if (empty($results)) {
 }
 
 // Ergebnisse vereinheitlichen
-$output = array_map(function ($item) {
-    return [
+$output = [];
+foreach ($results as $item) {
+    if (!is_array($item)) continue;
+    $output[] = [
         "Id" => $item['Id'] ?? null,
         "Sku" => $item['Sku'] ?? null,
         "Name" => $item['Name'] ?? '(Kein Name)',
@@ -94,7 +99,7 @@ $output = array_map(function ($item) {
         "Price" => isset($item['Price']) ? round($item['Price'], 2) : null,
         "ProductUrl" => "https://www.loebbeshop.de/search/?q=" . urlencode($item['Sku'])
     ];
-}, $results);
+}
 
 // JSON ausgeben
 echo json_encode([
