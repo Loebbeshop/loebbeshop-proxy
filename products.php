@@ -2,10 +2,10 @@
 header('Content-Type: application/json; charset=utf-8');
 
 /**
- * LöbbeShop Smartstore Proxy (Version 2.4.1 - robust)
+ * LöbbeShop Smartstore Proxy (Version 2.4.2 - stabil & kompatibel mit PHP 8.3)
  * ---------------------------------------------------
  * Kombinierte Suche nach Wartungsset + Herstellernummer
- * Stabile Fehlerbehandlung und klare Fallback-Logik
+ * Robuste Fehlerbehandlung, keine leeren urlencode() Parameter
  */
 
 $publicKey = '0884bd1c9bdb7e2f17a3e1429b1c5021';
@@ -26,7 +26,7 @@ function callSmartstore($url, $authHeader) {
         CURLOPT_HTTPHEADER => [
             "Authorization: {$authHeader}",
             "Accept: application/json",
-            "User-Agent: LoebbeshopProxy/2.4.1"
+            "User-Agent: LoebbeshopProxy/2.4.2"
         ],
         CURLOPT_SSL_VERIFYPEER => true,
         CURLOPT_TIMEOUT => 20
@@ -51,43 +51,47 @@ $results = [];
 
 // 1️⃣ Nur q (z. B. Wartungsset)
 if ($q && !$num) {
-    $url = $baseUrl . "&\$filter=" . urlencode("contains(Name,'{$q}') or contains(ShortDescription,'{$q}')");
+    $filter = "contains(Name,'{$q}') or contains(ShortDescription,'{$q}') or contains(MetaDescription,'{$q}')";
+    $url = $baseUrl . "&\$filter=" . urlencode($filter);
     $results = callSmartstore($url, $authHeader);
 
 // 2️⃣ Nur num (z. B. 7513046)
 } elseif ($num && !$q) {
-    $url = $baseUrl . "&\$filter=" . urlencode("contains(Name,'{$num}') or contains(ShortDescription,'{$num}') or contains(Sku,'{$num}')");
+    $filter = "contains(Name,'{$num}') or contains(ShortDescription,'{$num}') or contains(Sku,'{$num}') or contains(MetaKeywords,'{$num}')";
+    $url = $baseUrl . "&\$filter=" . urlencode($filter);
     $results = callSmartstore($url, $authHeader);
 
 // 3️⃣ Kombiniert (z. B. Wartungsset + 7513046)
 } elseif ($q && $num) {
-    // Erst alle Produkte zum Gerät holen
-    $urlNum = $baseUrl . "&\$filter=" . urlencode("contains(Name,'{$num}') or contains(ShortDescription,'{$num}') or contains(Sku,'{$num}')");
+    // Erst alle Produkte zur Herstellernummer holen
+    $filterNum = "contains(Name,'{$num}') or contains(ShortDescription,'{$num}') or contains(Sku,'{$num}') or contains(MetaKeywords,'{$num}')";
+    $urlNum = $baseUrl . "&\$filter=" . urlencode($filterNum);
     $dataNum = callSmartstore($urlNum, $authHeader);
 
-    // Dann lokal nach „Wartungsset“ filtern (nur wenn Ergebnis-Array)
+    // Dann lokal nach „Wartungsset“ filtern
     if (is_array($dataNum)) {
         $results = array_filter($dataNum, function($item) use ($q) {
             if (!is_array($item)) return false;
-            $fields = ($item['Name'] ?? '') . ' ' . ($item['ShortDescription'] ?? '');
+            $fields = ($item['Name'] ?? '') . ' ' . ($item['ShortDescription'] ?? '') . ' ' . ($item['MetaDescription'] ?? '');
             return stripos($fields, $q) !== false;
         });
     }
 }
 
-// 🔁 Fallback bei leeren Treffern oder Fehlerobjekten
+// 🔁 Fallback bei leeren Treffern
 if (empty($results) || isset($results['error'])) {
+    $link = "https://www.loebbeshop.de/search/?q=" . urlencode(trim($num . ' ' . $q));
     echo json_encode([
         "error" => "Keine passenden Produkte gefunden.",
         "query" => $q,
         "herstellnummer" => $num,
         "message" => "Ich konnte keine exakten Treffer finden. Du kannst direkt im Loebbeshop nachsehen:",
-        "fallback" => "https://www.loebbeshop.de/search/?q=" . urlencode($num)
+        "fallback" => $link
     ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
     exit;
 }
 
-// Ergebnisse vereinheitlichen
+// Ergebnisse formatieren
 $output = [];
 foreach ($results as $item) {
     if (!is_array($item)) continue;
