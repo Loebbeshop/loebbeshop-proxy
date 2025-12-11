@@ -2,14 +2,10 @@
 header('Content-Type: application/json; charset=utf-8');
 
 /**
- * LöbbeShop Smartstore Proxy (Version 2.3 - stabil)
- * -------------------------------------------------
- * Unterstützt:
- *  - ?q=Wartungsset
- *  - ?num=7513046
- *  - ?q=Wartungsset&num=7513046
- * 
- * Vermeidet Smartstore-OData-Fehler (400) durch getrennte Abfragen
+ * LöbbeShop Smartstore Proxy (Version 2.4 - präzise Filterung)
+ * -------------------------------------------------------------
+ * - Unterstützt kombinierte Suche nach Herstellernummer + Suchwort
+ * - Filtert Ergebnisse serverseitig (keine Smartstore-Fehler mehr)
  */
 
 $publicKey = '0884bd1c9bdb7e2f17a3e1429b1c5021';
@@ -17,7 +13,7 @@ $secretKey = '33b5b3892603471204755cd4f015bc97';
 
 $q   = isset($_GET['q'])   ? trim($_GET['q'])   : null;
 $num = isset($_GET['num']) ? trim($_GET['num']) : null;
-$top = 100;
+$top = 150;
 
 $authHeader = 'Basic ' . base64_encode("{$publicKey}:{$secretKey}");
 $baseUrl = "https://www.loebbeshop.de/odata/v1/Products?\$top={$top}";
@@ -30,7 +26,7 @@ function callSmartstore($url, $authHeader) {
         CURLOPT_HTTPHEADER => [
             "Authorization: {$authHeader}",
             "Accept: application/json",
-            "User-Agent: LoebbeshopProxy/2.3"
+            "User-Agent: LoebbeshopProxy/2.4"
         ],
         CURLOPT_SSL_VERIFYPEER => true,
         CURLOPT_TIMEOUT => 20
@@ -41,7 +37,7 @@ function callSmartstore($url, $authHeader) {
     curl_close($ch);
 
     if ($error) {
-        return ["error" => "cURL: $error"];
+        return ["error" => "Proxy-Fehler: $error"];
     }
     if ($httpCode !== 200) {
         return ["error" => "Smartstore HTTP $httpCode"];
@@ -53,41 +49,42 @@ function callSmartstore($url, $authHeader) {
 
 $results = [];
 
-// 1️⃣ Nur q → einfache Suche
+// 1️⃣ Nur q (z. B. Wartungsset)
 if ($q && !$num) {
-    $url = $baseUrl . "&\$filter=" . urlencode("contains(Name,'{$q}')");
+    $url = $baseUrl . "&\$filter=" . urlencode("contains(Name,'{$q}') or contains(ShortDescription,'{$q}')");
     $results = callSmartstore($url, $authHeader);
 
-// 2️⃣ Nur num → Suche nach Herstellernummer
+// 2️⃣ Nur num (z. B. 7513046)
 } elseif ($num && !$q) {
-    $url = $baseUrl . "&\$filter=" . urlencode("contains(ShortDescription,'{$num}') or contains(Name,'{$num}') or contains(Sku,'{$num}')");
+    $url = $baseUrl . "&\$filter=" . urlencode("contains(Name,'{$num}') or contains(ShortDescription,'{$num}') or contains(Sku,'{$num}')");
     $results = callSmartstore($url, $authHeader);
 
-// 3️⃣ Kombi → getrennte Suchen + Filterung in PHP
+// 3️⃣ Kombiniert (z. B. Wartungsset + 7513046)
 } elseif ($q && $num) {
-    $url1 = $baseUrl . "&\$filter=" . urlencode("contains(Name,'{$num}') or contains(ShortDescription,'{$num}') or contains(Sku,'{$num}')");
-    $url2 = $baseUrl . "&\$filter=" . urlencode("contains(Name,'{$q}') or contains(ShortDescription,'{$q}')");
-    $dataNum = callSmartstore($url1, $authHeader);
-    $dataQ = callSmartstore($url2, $authHeader);
+    // Erst alle Produkte zum Gerät holen
+    $urlNum = $baseUrl . "&\$filter=" . urlencode("contains(Name,'{$num}') or contains(ShortDescription,'{$num}') or contains(Sku,'{$num}')");
+    $dataNum = callSmartstore($urlNum, $authHeader);
 
-    // PHP-Filterung nach beiden Kriterien
+    // Dann lokal nach „Wartungsset“ filtern
     $results = array_filter($dataNum, function($item) use ($q) {
-        return stripos($item['Name'] ?? '', $q) !== false ||
-               stripos($item['ShortDescription'] ?? '', $q) !== false;
+        $fields = ($item['Name'] ?? '') . ' ' . ($item['ShortDescription'] ?? '');
+        return stripos($fields, $q) !== false;
     });
 }
 
+// 🔁 Fallback bei leeren Treffern
 if (empty($results)) {
     echo json_encode([
-        "error" => "Keine Ergebnisse gefunden oder Smartstore-Fehler.",
+        "error" => "Keine passenden Produkte gefunden.",
         "query" => $q,
         "herstellnummer" => $num,
-        "fallback" => "https://www.loebbeshop.de/search/?q=" . urlencode(trim("$q $num"))
+        "message" => "Ich konnte keine exakten Treffer finden. Du kannst direkt im Loebbeshop nachsehen:",
+        "fallback" => "https://www.loebbeshop.de/search/?q=" . urlencode($num)
     ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
     exit;
 }
 
-// Ergebnis-Transformation
+// Ergebnisse vereinheitlichen
 $output = array_map(function ($item) {
     return [
         "Id" => $item['Id'] ?? null,
@@ -99,11 +96,11 @@ $output = array_map(function ($item) {
     ];
 }, $results);
 
-// Ausgabe
+// JSON ausgeben
 echo json_encode([
     "query" => $q,
     "herstellnummer" => $num,
     "result_count" => count($output),
-    "results" => $output
+    "results" => array_values($output)
 ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
 ?>
